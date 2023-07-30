@@ -9,7 +9,7 @@ use parse_int::parse;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct EthBlockNumberResponse {
     id: u8,
     result: String,
@@ -58,6 +58,8 @@ async fn get_block_number(url: &str) -> Option<u32> {
 }
 
 async fn fetch_block_number_response(url: &str) -> Result<EthBlockNumberResponse, reqwest::Error> {
+    log::debug!("Querying: {}", url);
+
     let json_response: EthBlockNumberResponse = reqwest::Client::new()
         .post(url)
         .json(&serde_json::json!({
@@ -71,5 +73,6 @@ async fn fetch_block_number_response(url: &str) -> Result<EthBlockNumberResponse
         .json()
         .await?;
 
+    log::debug!("Fetched: {:?}", json_response);
     Ok(json_response)
 }
