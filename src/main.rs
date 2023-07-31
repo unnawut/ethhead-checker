@@ -57,7 +57,7 @@ async fn get_block_number(url: &str) -> Option<u32> {
     }
 }
 
-async fn fetch_block_number_response(url: &str) -> Result<EthBlockNumberResponse, reqwest::Error> {
+async fn fetch_block_number_response(url: &str) -> Result<EthBlockNumberResponse, AppError> {
     log::debug!("Querying: {}", url);
 
     let json_response: EthBlockNumberResponse = reqwest::Client::new()
