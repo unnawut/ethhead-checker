@@ -1,7 +1,7 @@
 use axum::{
     routing::get,
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     Json,
     Router
 };
@@ -75,4 +75,31 @@ async fn fetch_block_number_response(url: &str) -> Result<EthBlockNumberResponse
 
     log::debug!("Fetched: {:?}", json_response);
     Ok(json_response)
+}
+
+enum AppError {
+    FetchError(reqwest::Error),
+}
+
+impl From<reqwest::Error> for AppError {
+    fn from(error: reqwest::Error) -> Self {
+        AppError::FetchError(error)
+    }
+}
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        let (status, error_message) = match self {
+            AppError::FetchError(error) => {
+                log::error!("Could not fetch block number from: {:?}", error.url());
+                (StatusCode::INTERNAL_SERVER_ERROR, "Could not fetch block number" )
+            }
+        };
+
+        let body = Json(json!({
+            "error": error_message,
+        }));
+
+        (status, body).into_response()
+    }
 }
