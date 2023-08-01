@@ -5,14 +5,23 @@ use axum::{
     Json,
     Router
 };
+use core::num::ParseIntError;
+use futures::join;
 use parse_int::parse;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json,Value};
+use std::time::Duration;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct EthBlockNumberResponse {
     id: u8,
     result: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BlockNumberByProvider {
+    provider: String,
+    block_number: u32,
 }
 
 #[tokio::main]
@@ -28,39 +37,57 @@ async fn main() {
         .unwrap();
 }
 
-async fn compare_heads() -> impl IntoResponse {
+async fn get_block_number_infura() -> Result<BlockNumberByProvider, AppError> {
     let env_infura_key: Option<String> = dotenv::var("INFURA_KEY").ok();
     let url: &str = &*format!("https://sepolia.infura.io/v3/{}", env_infura_key.unwrap());
 
-    match get_block_number(url).await {
-        Some(block_number) => {
-            log::info!("Found infura block number: {}", block_number);
-            (StatusCode::OK, Json(json!({ "infura": block_number })))
-        }
-        None => {
-            log::error!("Could not look up block number from Infura: {}", url);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error_message": "Could not look up block number from Infura" })))
-        }
-    }
+    log::info!("Fetching: {}", url);
+    let block_number = get_block_number(url).await?;
+    log::info!("Found infura block number: {}", block_number);
 
+    Ok(BlockNumberByProvider {
+        provider: String::from("infura"),
+        block_number: block_number,
+    })
 }
 
-async fn get_block_number(url: &str) -> Option<u32> {
-    match fetch_block_number_response(url).await {
-        Ok(response) => {
-            match parse::<u32>(&response.result.to_string()) {
-                Ok(parsed_block_number) => Some(parsed_block_number),
-                _ => None
-            }
-        }
-        _ => None
-    }
+async fn get_block_number_bordel() -> Result<BlockNumberByProvider, AppError> {
+    let url = "https://rpc.bordel.wtf/sepolia";
+
+    log::info!("Fetching: {}", url);
+    let block_number = get_block_number(url).await?;
+    log::info!("Found bordel block number: {}", block_number);
+
+    Ok(BlockNumberByProvider {
+        provider: String::from("bordel"),
+        block_number: block_number,
+    })
+}
+
+async fn compare_heads() -> Result<(StatusCode, Json<Value>), AppError> {
+    let future_infura = get_block_number_infura();
+    let future_bordel = get_block_number_bordel();
+
+    let (block_number_infura, block_number_bordel) = join!(future_infura, future_bordel);
+
+    let mut digest: Vec<BlockNumberByProvider> = Vec::<BlockNumberByProvider>::new();
+    digest.push(block_number_infura?);
+    digest.push(block_number_bordel?);
+
+    Ok((StatusCode::OK, Json(json!(digest))))
+}
+
+async fn get_block_number(url: &str) -> Result<u32, AppError> {
+    let response = fetch_block_number_response(url).await?;
+    Ok(parse::<u32>(&response.result.to_string())?)
 }
 
 async fn fetch_block_number_response(url: &str) -> Result<EthBlockNumberResponse, AppError> {
     log::debug!("Querying: {}", url);
 
-    let json_response: EthBlockNumberResponse = reqwest::Client::new()
+    let json_response: EthBlockNumberResponse = reqwest::Client::builder()
+        .timeout(Duration::from_millis(3000))
+        .build()?
         .post(url)
         .json(&serde_json::json!({
             "jsonrpc": "2.0",
@@ -79,11 +106,18 @@ async fn fetch_block_number_response(url: &str) -> Result<EthBlockNumberResponse
 
 enum AppError {
     FetchError(reqwest::Error),
+    ParseError(ParseIntError),
 }
 
 impl From<reqwest::Error> for AppError {
     fn from(error: reqwest::Error) -> Self {
         AppError::FetchError(error)
+    }
+}
+
+impl From<ParseIntError> for AppError {
+    fn from(error: ParseIntError) -> Self {
+        AppError::ParseError(error)
     }
 }
 
@@ -93,6 +127,10 @@ impl IntoResponse for AppError {
             AppError::FetchError(error) => {
                 log::error!("Could not fetch block number from: {:?}", error.url());
                 (StatusCode::INTERNAL_SERVER_ERROR, "Could not fetch block number" )
+            }
+            AppError::ParseError(error) => {
+                log::error!("Could not parse block number: {:?}", error);
+                (StatusCode::INTERNAL_SERVER_ERROR, "Could not parse block number" )
             }
         };
 
