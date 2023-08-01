@@ -1,11 +1,9 @@
 use axum::{
     routing::get,
     http::StatusCode,
-    response::{IntoResponse, Response},
     Json,
     Router
 };
-use core::num::ParseIntError;
 use futures::join;
 use parse_int::parse;
 use serde::{Deserialize, Serialize};
@@ -21,7 +19,7 @@ struct EthBlockNumberResponse {
 #[derive(Debug, Serialize, Deserialize)]
 struct BlockNumberByProvider {
     provider: String,
-    block_number: u32,
+    block_number: Option<u32>,
 }
 
 #[tokio::main]
@@ -37,53 +35,87 @@ async fn main() {
         .unwrap();
 }
 
-async fn get_block_number_infura() -> Result<BlockNumberByProvider, AppError> {
-    let env_infura_key: Option<String> = dotenv::var("INFURA_KEY").ok();
-    let url: &str = &*format!("https://sepolia.infura.io/v3/{}", env_infura_key.unwrap());
-
-    log::info!("Fetching: {}", url);
-    let block_number = get_block_number(url).await?;
-    log::info!("Found infura block number: {}", block_number);
-
-    Ok(BlockNumberByProvider {
-        provider: String::from("infura"),
-        block_number: block_number,
-    })
-}
-
-async fn get_block_number_bordel() -> Result<BlockNumberByProvider, AppError> {
-    let url = "https://rpc.bordel.wtf/sepolia";
-
-    log::info!("Fetching: {}", url);
-    let block_number = get_block_number(url).await?;
-    log::info!("Found bordel block number: {}", block_number);
-
-    Ok(BlockNumberByProvider {
-        provider: String::from("bordel"),
-        block_number: block_number,
-    })
-}
-
-async fn compare_heads() -> Result<(StatusCode, Json<Value>), AppError> {
+async fn compare_heads() -> (StatusCode, Json<Value>) {
+    let future_rpc = get_block_number_rpc();
+    let future_rpc2 = get_block_number_rpc2();
     let future_infura = get_block_number_infura();
     let future_bordel = get_block_number_bordel();
 
-    let (block_number_infura, block_number_bordel) = join!(future_infura, future_bordel);
+    let (
+        block_number_rpc,
+        block_number_rpc2,
+        block_number_infura,
+        block_number_bordel
+    ) = join!(
+        future_rpc,
+        future_rpc2,
+        future_infura,
+        future_bordel
+    );
 
     let mut digest: Vec<BlockNumberByProvider> = Vec::<BlockNumberByProvider>::new();
-    digest.push(block_number_infura?);
-    digest.push(block_number_bordel?);
+    digest.push(block_number_rpc);
+    digest.push(block_number_rpc2);
+    digest.push(block_number_infura);
+    digest.push(block_number_bordel);
 
-    Ok((StatusCode::OK, Json(json!(digest))))
+    (StatusCode::OK, Json(json!(digest)))
 }
 
-async fn get_block_number(url: &str) -> Result<u32, AppError> {
-    let response = fetch_block_number_response(url).await?;
-    Ok(parse::<u32>(&response.result.to_string())?)
+async fn get_block_number_rpc() -> BlockNumberByProvider {
+    let block_number = get_block_number("https://rpc.sepolia.org").await;
+    block_number_by_provider("rpc", block_number)
 }
 
-async fn fetch_block_number_response(url: &str) -> Result<EthBlockNumberResponse, AppError> {
-    log::debug!("Querying: {}", url);
+async fn get_block_number_rpc2() -> BlockNumberByProvider {
+    let block_number = get_block_number("https://rpc2.sepolia.org").await;
+    block_number_by_provider("rpc2", block_number)
+}
+
+async fn get_block_number_infura() -> BlockNumberByProvider {
+    let env_infura_key: Option<String> = dotenv::var("INFURA_KEY").ok();
+    let url: &str = &*format!("https://sepolia.infura.io/v3/{}", env_infura_key.unwrap());
+    let block_number = get_block_number(url).await;
+
+    block_number_by_provider("infura", block_number)
+}
+
+async fn get_block_number_bordel() -> BlockNumberByProvider {
+    let block_number = get_block_number("https://rpc.bordel.wtf/sepolia").await;
+    block_number_by_provider("bordel", block_number)
+}
+
+fn block_number_by_provider(provider: &str, block_number: Option<u32>) -> BlockNumberByProvider {
+    BlockNumberByProvider {
+        provider: String::from(provider),
+        block_number: block_number,
+    }
+}
+
+async fn get_block_number(url: &str) -> Option<u32> {
+    match fetch_block_number_response(url).await {
+        Ok(response) => {
+            let block_number = parse_block_number_response(response);
+            log::info!("Fetched {} -> {:?}", url, block_number);
+
+            block_number
+        }
+        Err(error) => {
+            log::warn!("Could not fetch block number from: {}", url);
+            log::warn!("Fetch error: {:?}", error);
+
+            None
+        }
+
+    }
+}
+
+fn parse_block_number_response(response: EthBlockNumberResponse) -> Option<u32> {
+    parse::<u32>(&response.result.to_string()).ok()
+}
+
+async fn fetch_block_number_response(url: &str) -> Result<EthBlockNumberResponse, reqwest::Error> {
+    log::info!("Fetching: {}", url);
 
     let json_response: EthBlockNumberResponse = reqwest::Client::builder()
         .timeout(Duration::from_millis(3000))
@@ -100,44 +132,5 @@ async fn fetch_block_number_response(url: &str) -> Result<EthBlockNumberResponse
         .json()
         .await?;
 
-    log::debug!("Fetched: {:?}", json_response);
     Ok(json_response)
-}
-
-enum AppError {
-    FetchError(reqwest::Error),
-    ParseError(ParseIntError),
-}
-
-impl From<reqwest::Error> for AppError {
-    fn from(error: reqwest::Error) -> Self {
-        AppError::FetchError(error)
-    }
-}
-
-impl From<ParseIntError> for AppError {
-    fn from(error: ParseIntError) -> Self {
-        AppError::ParseError(error)
-    }
-}
-
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        let (status, error_message) = match self {
-            AppError::FetchError(error) => {
-                log::error!("Could not fetch block number from: {:?}", error.url());
-                (StatusCode::INTERNAL_SERVER_ERROR, "Could not fetch block number" )
-            }
-            AppError::ParseError(error) => {
-                log::error!("Could not parse block number: {:?}", error);
-                (StatusCode::INTERNAL_SERVER_ERROR, "Could not parse block number" )
-            }
-        };
-
-        let body = Json(json!({
-            "error": error_message,
-        }));
-
-        (status, body).into_response()
-    }
 }
